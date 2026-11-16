@@ -31,6 +31,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
+	"k8s.io/kubectl/pkg/cmd/util"
 )
 
 func getFakeEvents() *corev1.EventList {
@@ -106,6 +107,79 @@ func getFakeEvents() *corev1.EventList {
 	}
 }
 
+func TestEventsHonorsChunkSize(t *testing.T) {
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+	tests := []struct {
+		name      string
+		chunkSize int64
+		wantLimit string
+	}{
+		{
+			name:      "custom chunk size",
+			chunkSize: 100,
+			wantLimit: "100",
+		},
+		{
+			name:      "disable chunking",
+			chunkSize: 0,
+			wantLimit: "",
+		},
+		{
+			name:      "default chunk size",
+			chunkSize: util.DefaultChunkSize,
+			wantLimit: "500",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			streams, _, _, _ := genericiooptions.NewTestIOStreams()
+			clientset, err := kubernetes.NewForConfig(cmdtesting.DefaultClientConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var gotLimit string
+			clientset.CoreV1().RESTClient().(*restclient.RESTClient).Client = fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+				gotLimit = req.URL.Query().Get("limit")
+				return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: cmdtesting.ObjBody(codec, getFakeEvents())}, nil
+			})
+
+			printer := NewEventPrinter(true, true)
+			options := &EventsOptions{
+				AllNamespaces: true,
+				ChunkSize:     tc.chunkSize,
+				client:        clientset,
+				PrintObj: func(object runtime.Object, writer io.Writer) error {
+					return printer.PrintObj(object, writer)
+				},
+				IOStreams: streams,
+			}
+			if err := options.Run(); err != nil {
+				t.Fatal(err)
+			}
+			if gotLimit != tc.wantLimit {
+				t.Fatalf("list limit = %q, want %q", gotLimit, tc.wantLimit)
+			}
+		})
+	}
+}
+
+func TestEventsToOptionsCopiesChunkSize(t *testing.T) {
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+	streams, _, _, _ := genericiooptions.NewTestIOStreams()
+
+	flags := NewEventsFlags(tf, streams)
+	flags.ChunkSize = 100
+	o, err := flags.ToOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.ChunkSize != 100 {
+		t.Fatalf("ChunkSize = %d, want 100", o.ChunkSize)
+	}
+}
+
 func TestEventIsSorted(t *testing.T) {
 	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 	streams, _, buf, _ := genericiooptions.NewTestIOStreams()
@@ -122,6 +196,7 @@ func TestEventIsSorted(t *testing.T) {
 
 	options := &EventsOptions{
 		AllNamespaces: true,
+		ChunkSize:     util.DefaultChunkSize,
 		client:        clientset,
 		PrintObj: func(object runtime.Object, writer io.Writer) error {
 			return printer.PrintObj(object, writer)
@@ -160,6 +235,7 @@ func TestEventNoHeaders(t *testing.T) {
 
 	options := &EventsOptions{
 		AllNamespaces: true,
+		ChunkSize:     util.DefaultChunkSize,
 		client:        clientset,
 		PrintObj: func(object runtime.Object, writer io.Writer) error {
 			return printer.PrintObj(object, writer)
@@ -197,6 +273,7 @@ func TestEventFiltered(t *testing.T) {
 
 	options := &EventsOptions{
 		AllNamespaces: true,
+		ChunkSize:     util.DefaultChunkSize,
 		client:        clientset,
 		FilterTypes:   []string{"WARNING"},
 		PrintObj: func(object runtime.Object, writer io.Writer) error {
